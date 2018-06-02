@@ -1,6 +1,6 @@
 package dev.nigredo
 
-import org.bson.codecs.Codec
+
 import org.bson.codecs.configuration.CodecRegistry
 
 import scala.annotation.tailrec
@@ -8,11 +8,11 @@ import scala.language.experimental.macros
 import scala.reflect.macros.blackbox
 
 object Codec {
-  def gen[A](registry: CodecRegistry): Codec[A] = macro CodecImpl.impl[A]
+  def gen[A](registry: CodecRegistry): org.bson.codecs.Codec[A] = macro CodecImpl.impl[A]
 }
 
 object CodecImpl {
-  def impl[A: c.WeakTypeTag](c: blackbox.Context)(registry: c.Expr[CodecRegistry]): c.Expr[Codec[A]] = {
+  def impl[A: c.WeakTypeTag](c: blackbox.Context)(registry: c.Expr[CodecRegistry]): c.Expr[org.bson.codecs.Codec[A]] = {
     import c.universe._
     val ts = weakTypeOf[A]
 
@@ -37,6 +37,9 @@ object CodecImpl {
     }
 
     def writerImpl(sym: ClassSymbol, path: List[TermName] = Nil, writeFieldName: Boolean = true): Seq[c.universe.Tree] = {
+
+      def typeFieldName(base: String) = s"_${base}_type"
+
       getPrimaryCtorParams(sym).map { sm =>
         val typeSymbol = sm.typeSignature.typeSymbol.asClass
         val p = if (sm.isType) path else path.:+(sm.name.toTermName)
@@ -52,7 +55,7 @@ object CodecImpl {
 
         q"""
          ${
-          if(weakTypeOf[org.mongodb.scala.bson.ObjectId].typeSymbol == typeSymbol)
+          if (weakTypeOf[org.mongodb.scala.bson.ObjectId].typeSymbol == typeSymbol)
             write("writeObjectId")
           else if (c.universe.definitions.StringClass == typeSymbol || c.universe.definitions.CharClass == typeSymbol)
             write("writeString")
@@ -90,10 +93,35 @@ object CodecImpl {
                   case Some($termName) => ..${writerImpl(typeArg, List(termName), false)}
                }
              """
-          } else if (sym.isCaseClass) {
+          } else if (typeSymbol.isSealed) {
+            q"""
+                ${buildPath(path.:+(sm.name.toTermName), q"")} match { case ..${
+              typeSymbol.knownDirectSubclasses.map(x => {
+                val name = TermName(c.freshName())
+                val fieldName = sm.name.encodedName.toString
+                cq"""$name: $x =>
+                    writer.writeString(${typeFieldName(fieldName)}, ${x.name.encodedName.toString})
+                    writer.writeName($fieldName)
+                    ${
+                  if (x.isModuleClass) q"writer.writeString(${x.name.encodedName.toString})"
+                  else q"$registry.get[$x](classOf[$x]).encode(writer, ${buildPath(List(name))}, encoderContext)"
+                }
+                    """
+              })
+            }}"""
+          }
+          else if (typeSymbol.isModuleClass) {
+            val fieldName = sm.name.encodedName.toString
+            q"""
+                  writer.writeString(${typeFieldName(fieldName)}, ${typeSymbol.name.encodedName.toString})
+                  writer.writeName($fieldName)
+                  writer.writeString(${typeSymbol.name.encodedName.toString})
+               """
+          }
+          else if (typeSymbol.isCaseClass) {
             q"""
                writer.writeName(${sm.name.encodedName.toString})
-               $registry.get[$typeSymbol](classOf[$typeSymbol]).encode(writer, ${buildPath(path.:+(sm.name.toTermName))}, encoderContext)
+               $registry.get(classOf[$typeSymbol]).encode(writer, ${buildPath(path.:+(sm.name.toTermName))}, encoderContext)
              """
           } else q""
         }
@@ -101,26 +129,39 @@ object CodecImpl {
       }.filter(_.nonEmpty)
     }
 
-    def readerImpl(sym: ClassSymbol, path: List[TermName] = Nil): Seq[c.universe.Tree] = {
-      getPrimaryCtorParams(sym).map { sm =>
+    def readerImpl(sym: ClassSymbol, path: List[TermName] = Nil): c.universe.Tree = {
+      val code = getPrimaryCtorParams(sym).map { sm =>
         val typeSymbol = sm.typeSignature.typeSymbol.asClass
-        q"""
-           val data = mutable.Map.empty[String, Any]
-           while (reader.readBsonType() != org.bson.BsonType.END_OF_DOCUMENT) {
-              val cbt = reader.getCurrentBsonType
-              val name = reader.readName()
-              if(cbt == BsonType.STRING) {
-                 map.+=(name -> reader.readString())
-              } else if(cbt == BsonType.DOUBLE) {
-                 map.+=(name -> reader.readDouble())
-              } else if(cbt == BsonType.INT32) {
-                 map.+=(name -> reader.readInt32())
-              } else {
-                 reader.skipValue()
-              }
-           }
-         """
-      }.filter(_.nonEmpty).+:(q"reader.readStartDocument()").:+(q"writer.readEndDocument()")
+        //        println(typeSymbol)
+        if (sym.isCaseClass) {
+          val r =
+            q"""
+               $registry.get[$typeSymbol](classOf[$typeSymbol]).decode(reader, decoderContext)
+             """
+          //          println(showCode(r))
+        }
+        q""
+        //        q"""
+        //              val cbt = reader.getCurrentBsonType
+        //              val name = reader.readName()
+        //              if(cbt == org.bson.BsonType.STRING) {
+        //                 dataAsMap.+=(name -> reader.readString())
+        //              } else if(cbt == org.bson.BsonType.DOUBLE) {
+        //                 dataAsMap.+=(name -> reader.readDouble())
+        //              } else if(cbt == org.bson.BsonType.INT32) {
+        //                 dataAsMap.+=(name -> reader.readInt32())
+        //              } else {
+        //                 reader.skipValue()
+        //              }
+        //         """
+      }.filter(_.nonEmpty)
+      q"""
+         reader.readStartDocument()
+         while (reader.readBsonType() != org.bson.BsonType.END_OF_DOCUMENT) {
+          ..$code
+         }
+         reader.readEndDocument()
+       """
     }
 
     val code =
@@ -136,24 +177,7 @@ object CodecImpl {
           override def getEncoderClass: Class[$ts] = classOf[$ts]
           }
      """
-    c.Expr[Codec[A]](code)
+    println(showCode(code))
+    c.Expr[org.bson.codecs.Codec[A]](code)
   }
 }
-
-//val map = scala.collection.mutable.Map.empty[String, Any]
-//reader.readStartDocument()
-//while (reader.readBsonType() != org.bson.BsonType.END_OF_DOCUMENT) {
-//val cbt = reader.getCurrentBsonType
-//val name = reader.readName()
-//if(cbt == BsonType.STRING) {
-//map.+=(name -> reader.readString())
-//} else if(cbt == BsonType.DOUBLE) {
-//map.+=(name -> reader.readDouble())
-//} else if(cbt == BsonType.INT32) {
-//map.+=(name -> reader.readInt32())
-//} else {
-//reader.skipValue()
-//}
-//}
-//reader.readEndDocument()
-//println(map)
