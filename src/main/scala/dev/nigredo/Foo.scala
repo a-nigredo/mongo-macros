@@ -8,7 +8,7 @@ case class Foo(id: ObjectId,
 
 case class Bar(v: String)
 
-case class SimpleFoo(adt: Adt = Adt3, adt2: Adt3.type = Adt3)
+case class SimpleFoo(str: String = "Str234", r: Int = 42)
 
 sealed trait Adt
 

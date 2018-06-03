@@ -14,6 +14,7 @@ object Codec {
 object CodecImpl {
   def impl[A: c.WeakTypeTag](c: blackbox.Context)(registry: c.Expr[CodecRegistry]): c.Expr[org.bson.codecs.Codec[A]] = {
     import c.universe._
+
     val ts = weakTypeOf[A]
 
     @tailrec
@@ -104,7 +105,7 @@ object CodecImpl {
                     writer.writeName($fieldName)
                     ${
                   if (x.isModuleClass) q"writer.writeString(${x.name.encodedName.toString})"
-                  else q"$registry.get[$x](classOf[$x]).encode(writer, ${buildPath(List(name))}, encoderContext)"
+                  else q"$registry.get(classOf[$x]).encode(writer, ${buildPath(List(name))}, encoderContext)"
                 }
                     """
               })
@@ -130,31 +131,19 @@ object CodecImpl {
     }
 
     def readerImpl(sym: ClassSymbol, path: List[TermName] = Nil): c.universe.Tree = {
-      val code = getPrimaryCtorParams(sym).map { sm =>
-        val typeSymbol = sm.typeSignature.typeSymbol.asClass
-        //        println(typeSymbol)
-        if (sym.isCaseClass) {
-          val r =
-            q"""
-               $registry.get[$typeSymbol](classOf[$typeSymbol]).decode(reader, decoderContext)
-             """
-          //          println(showCode(r))
-        }
-        q""
-        //        q"""
-        //              val cbt = reader.getCurrentBsonType
-        //              val name = reader.readName()
-        //              if(cbt == org.bson.BsonType.STRING) {
-        //                 dataAsMap.+=(name -> reader.readString())
-        //              } else if(cbt == org.bson.BsonType.DOUBLE) {
-        //                 dataAsMap.+=(name -> reader.readDouble())
-        //              } else if(cbt == org.bson.BsonType.INT32) {
-        //                 dataAsMap.+=(name -> reader.readInt32())
-        //              } else {
-        //                 reader.skipValue()
-        //              }
-        //         """
-      }.filter(_.nonEmpty)
+      val code =
+        q"""
+          val caseClassAsMap = Map[String, Class[_]](..${
+          getPrimaryCtorParams(sym)
+            .map(x => q"${x.name.encodedName.toString} -> classOf[${x.typeSignature.typeSymbol}]")
+        })
+          val name = reader.readName()
+          caseClassAsMap.get(name).fold(reader.skipValue()){ x =>
+            if(x.isAssignableFrom(classOf[${c.universe.definitions.StringClass}])) dataAsMap.+=(name -> reader.readString())
+            else if(x.isAssignableFrom(classOf[${c.universe.definitions.IntClass}])) dataAsMap.+=(name -> reader.readInt32())
+            else reader.skipValue()
+          }"""
+
       q"""
          reader.readStartDocument()
          while (reader.readBsonType() != org.bson.BsonType.END_OF_DOCUMENT) {
@@ -168,8 +157,14 @@ object CodecImpl {
       q"""
        new org.bson.codecs.Codec[$ts] {
             override def decode(reader: org.bson.BsonReader, decoderContext: org.bson.codecs.DecoderContext): $ts = {
-              ???
-            }
+              val dataAsMap = scala.collection.mutable.Map.empty[String, Any]
+              ${readerImpl(ts.typeSymbol.asClass)}
+              new $ts(..${
+        getPrimaryCtorParams(ts.typeSymbol.asClass).map(x =>
+          q"""${x.name.toTermName} = dataAsMap.get(${x.name.encodedName.toString})
+             .map(_.asInstanceOf[${x.typeSignature.typeSymbol.name.toTypeName}])
+             .getOrElse(throw new IllegalStateException("Could not find field " + ${ts.typeSymbol.name.encodedName.toString} + "#" + ${x.name.encodedName.toString} + " in bson"))""")
+      })}
 
           override def encode(writer: org.bson.BsonWriter, value: $ts, encoderContext: org.bson.codecs.EncoderContext): Unit =
               ${q"..${writerImpl(ts.typeSymbol.asClass, List(TermName("value"))).+:(q"writer.writeStartDocument()").:+(q"writer.writeEndDocument()")}"}

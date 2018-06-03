@@ -10,6 +10,9 @@ import scala.concurrent.Await
 import scala.concurrent.duration.Duration
 
 class FooSpecs extends Specification {
+
+
+
  "Foo" should {
    "bar" in {
 
@@ -18,9 +21,9 @@ class FooSpecs extends Specification {
      import org.mongodb.scala.bson.codecs.DEFAULT_CODEC_REGISTRY
 
 //     val barRegistry = fromRegistries(fromCodecs(Codec.gen[Bar](DEFAULT_CODEC_REGISTRY)))
-     val adt1Reg = fromRegistries(fromCodecs(Codec.gen[Adt1](DEFAULT_CODEC_REGISTRY)))
-     val adt2Reg = fromRegistries(fromCodecs(Codec.gen[Adt2](DEFAULT_CODEC_REGISTRY)))
-     val codecRegistry = fromRegistries(fromCodecs(Codec.gen[SimpleFoo](fromRegistries(adt1Reg, adt2Reg))), DEFAULT_CODEC_REGISTRY)
+//     val adt1Reg = fromRegistries(fromCodecs(Codec.gen[Adt1](DEFAULT_CODEC_REGISTRY)))
+//     val adt2Reg = fromRegistries(fromCodecs(Codec.gen[Adt2](DEFAULT_CODEC_REGISTRY)))
+     val codecRegistry = fromRegistries(fromCodecs(Codec.gen[SimpleFoo](DEFAULT_CODEC_REGISTRY)), DEFAULT_CODEC_REGISTRY)
      val database = MongoClient().getDatabase("test").withCodecRegistry(codecRegistry)
      val collection = database.getCollection[SimpleFoo]("foo")
      Await.result(collection.deleteMany(BsonDocument()).toFuture(), Duration.Inf)
